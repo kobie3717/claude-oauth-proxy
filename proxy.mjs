@@ -266,7 +266,7 @@ function startProxy(port, token) {
         "Access-Control-Expose-Headers": "*",
       };
       for (const [key, value] of upstreamRes.headers) {
-        if (["transfer-encoding", "connection", "keep-alive"].includes(key.toLowerCase())) continue;
+        if (["transfer-encoding", "connection", "keep-alive", "content-encoding"].includes(key.toLowerCase())) continue;
         responseHeaders[key] = value;
       }
 
