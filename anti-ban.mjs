@@ -30,33 +30,115 @@ import { createHash, randomUUID } from "node:crypto";
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════
+// PERSONA SYSTEM — Simulate multiple team members
+// Each persona has unique: timing, schedule, platform, coding style
+// ═══════════════════════════════════════════════════════════════════
+
+const PERSONAS = [
+  {
+    name: "lead-dev",           // Senior dev, morning person, fast typer
+    platform: "(external, cli, linux)",
+    preferredModels: ["claude-opus-4-6", "claude-sonnet-4-20250514"],
+    versionBias: "latest",     // Always on latest
+    timing: {
+      logNormalMu: 6.8,        // Faster (experienced)
+      logNormalSigma: 0.5,
+      thinkingChance: 0.15,    // Thinks less (knows what to do)
+      coffeeChance: 0.03,
+    },
+    schedule: {
+      activeHoursUTC: [6, 18],  // 8AM-8PM SAST
+      peakHoursUTC: [8, 14],    // Most active mid-morning
+      weekendActive: false,
+    },
+    rates: { perMinute: 8, perHour: 100, perDay: 500 },
+    sessions: { burstSize: [4, 10], duration: [600000, 14400000] },  // Longer sessions
+    workingDir: "/home/kobus/whatsauction",
+    fakeFiles: [
+      "src/index.ts", "src/app.ts", "src/routes/api.ts", "src/middleware/auth.ts",
+      "src/services/auction.ts", "src/services/bidding.ts", "prisma/schema.prisma",
+      "src/workers/whatsapp.ts", "src/config.ts", "docker-compose.yml",
+    ],
+  },
+  {
+    name: "backend-dev",        // Mid-level, afternoon/evening person
+    platform: "(external, cli)",
+    preferredModels: ["claude-sonnet-4-20250514"],
+    versionBias: "recent",     // Slightly behind on updates
+    timing: {
+      logNormalMu: 7.2,        // Slower (more careful)
+      logNormalSigma: 0.7,
+      thinkingChance: 0.28,    // Thinks more
+      coffeeChance: 0.05,      // More coffee breaks
+    },
+    schedule: {
+      activeHoursUTC: [10, 22], // Noon-midnight SAST
+      peakHoursUTC: [14, 20],
+      weekendActive: true,      // Codes on weekends sometimes
+    },
+    rates: { perMinute: 6, perHour: 70, perDay: 350 },
+    sessions: { burstSize: [2, 6], duration: [300000, 7200000] },  // Shorter sessions
+    workingDir: "/home/dev/api-service",
+    fakeFiles: [
+      "src/controllers/user.ts", "src/models/invoice.ts", "tests/billing.test.ts",
+      "src/lib/whatsapp.ts", "src/lib/payments.ts", "src/types.ts",
+      "migrations/001_init.sql", "src/validators/bid.ts", "package.json",
+    ],
+  },
+  {
+    name: "frontend-dev",       // Junior, sporadic, uses Sonnet
+    platform: "(external, cli, darwin)",  // Mac user
+    preferredModels: ["claude-sonnet-4-20250514"],
+    versionBias: "behind",     // Doesn't update often
+    timing: {
+      logNormalMu: 7.5,        // Slowest (learning, reading docs)
+      logNormalSigma: 0.8,
+      thinkingChance: 0.35,    // Lots of thinking
+      coffeeChance: 0.06,
+    },
+    schedule: {
+      activeHoursUTC: [8, 16],  // 10AM-6PM SAST (office hours)
+      peakHoursUTC: [10, 14],
+      weekendActive: false,
+    },
+    rates: { perMinute: 5, perHour: 50, perDay: 200 },
+    sessions: { burstSize: [2, 5], duration: [300000, 5400000] },
+    workingDir: "/Users/dev/whatsauction-app",
+    fakeFiles: [
+      "src/App.tsx", "src/components/AuctionCard.tsx", "src/pages/Dashboard.tsx",
+      "src/hooks/useAuction.ts", "src/api/client.ts", "tailwind.config.js",
+      "src/components/BidForm.tsx", "src/stores/auth.ts", "vite.config.ts",
+    ],
+  },
+];
+
+// Number of active personas (adjust to simulate team size)
+const ACTIVE_PERSONA_COUNT = parseInt(process.env.PERSONA_COUNT || "2");
+
 const CONFIG = {
-  // --- Timing ---
+  // --- Global Timing Defaults (overridden per persona) ---
   delays: {
     min: 500,
     max: 2800,
-    // Log-normal distribution parameters (more realistic than uniform)
     useLogNormal: true,
-    logNormalMu: 7.0,    // ~1.1s median
+    logNormalMu: 7.0,
     logNormalSigma: 0.6,
-    // Contextual pauses
     thinkingChance: 0.22,
     thinkingExtra: [1500, 7000],
     coffeeChance: 0.035,
     coffeeExtra: [15000, 60000],
-    tabSwitchChance: 0.08,   // Switched to another terminal tab
+    tabSwitchChance: 0.08,
     tabSwitchExtra: [5000, 20000],
     firstRequestDelay: [1200, 5000],
-    // After error, humans pause longer
     postErrorDelay: [3000, 12000],
   },
 
-  // --- Rate Limits ---
+  // --- Global Rate Limits (per persona) ---
   rates: {
     perMinute: 7,
     perHour: 90,
     perDay: 500,
-    // Adaptive: reduce limits after errors
     errorCooldownMultiplier: 0.5,
   },
 
@@ -64,9 +146,8 @@ const CONFIG = {
   sessions: {
     burstSize: [2, 8],
     burstPause: [6000, 45000],
-    duration: [480000, 10800000],    // 8min-3hr
-    breakTime: [180000, 3600000],    // 3-60min breaks
-    // Micro-pauses within a burst (reading output)
+    duration: [480000, 10800000],
+    breakTime: [180000, 3600000],
     microPauseChance: 0.35,
     microPause: [1000, 4000],
   },
@@ -76,7 +157,6 @@ const CONFIG = {
     startUTC: 21,
     endUTC: 4,
     maxPerHour: 3,
-    // Weekend multiplier (less coding)
     weekendMultiplier: 0.6,
   },
 
@@ -92,6 +172,7 @@ const CONFIG = {
     platforms: [
       "(external, cli)",
       "(external, cli, linux)",
+      "(external, cli, darwin)",
     ],
   },
 
@@ -104,21 +185,20 @@ const CONFIG = {
 
   // --- Circuit Breaker ---
   circuitBreaker: {
-    errorThreshold: 3,          // Consecutive errors before tripping
-    tripDuration: [60000, 300000],  // 1-5 min cooldown
-    maxTrips: 5,                // After this many trips, long cooldown
-    longCooldown: 1800000,      // 30 min
+    errorThreshold: 3,
+    tripDuration: [60000, 300000],
+    maxTrips: 5,
+    longCooldown: 1800000,
   },
 
   // --- Concurrency ---
-  maxConcurrent: 1,  // Claude Code is single-threaded CLI
+  // With multiple personas, allow concurrent requests (different "users")
+  maxConcurrent: ACTIVE_PERSONA_COUNT,
 
   // --- Conversation Shape ---
   conversation: {
-    // Chance to inject synthetic tool_use/tool_result pairs into history
     injectToolHistoryChance: 0.6,
     maxInjectedPairs: 2,
-    // Fake working directory paths
     workingDirs: [
       "/home/user/project",
       "/home/user/code/app",
@@ -126,7 +206,6 @@ const CONFIG = {
       "/home/user/dev/api",
       "/root/project",
     ],
-    // Fake file names for tool results
     fakeFiles: [
       "src/index.ts", "src/app.ts", "package.json", "tsconfig.json",
       "src/utils.ts", "src/config.ts", "README.md", ".env",
@@ -306,57 +385,131 @@ const SYNTHETIC_TOOL_TEMPLATES = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════
-// STATE
+// PERSONA STATE (each persona has independent state)
 // ═══════════════════════════════════════════════════════════════════
 
-const state = {
-  // Rate limiting
-  requestTimestamps: [],
-  hourlyCount: 0,
-  hourlyReset: Date.now() + 3600000,
-  dailyCount: 0,
-  dailyReset: Date.now() + 86400000,
+function createPersonaState(persona) {
+  const versionForBias = (bias) => {
+    if (bias === "latest") return CONFIG.identity.versions[0].v;
+    if (bias === "behind") return CONFIG.identity.versions[randomInt(2, CONFIG.identity.versions.length - 1)].v;
+    return weightedPick(CONFIG.identity.versions); // "recent"
+  };
   
-  // Session
-  currentBurstCount: 0,
-  currentBurstTarget: randomInt(...CONFIG.sessions.burstSize),
-  inBreak: false,
-  breakUntil: 0,
-  sessionStart: Date.now(),
-  sessionTarget: randomInt(...CONFIG.sessions.duration),
-  isFirstRequest: true,
-  
-  // Identity (pinned per session)
-  currentVersion: weightedPick(CONFIG.identity.versions),
-  currentPlatform: CONFIG.identity.platforms[0],
-  sessionId: generateSessionId(),
-  
-  // Model pinning (per session)
-  pinnedModel: null,
-  
-  // Conversation tracking
-  turnCount: 0,
-  lastRequestTime: 0,
-  lastModel: null,
-  
-  // Circuit breaker
-  consecutiveErrors: 0,
-  circuitOpen: false,
-  circuitOpenUntil: 0,
-  tripCount: 0,
-  
-  // Concurrency
+  return {
+    persona,
+    requestTimestamps: [],
+    hourlyCount: 0,
+    hourlyReset: Date.now() + 3600000,
+    dailyCount: 0,
+    dailyReset: Date.now() + 86400000,
+    
+    currentBurstCount: 0,
+    currentBurstTarget: randomInt(...(persona.sessions?.burstSize || CONFIG.sessions.burstSize)),
+    inBreak: false,
+    breakUntil: 0,
+    sessionStart: Date.now() - randomInt(0, 600000), // Stagger session starts
+    sessionTarget: randomInt(...(persona.sessions?.duration || CONFIG.sessions.duration)),
+    isFirstRequest: true,
+    
+    currentVersion: versionForBias(persona.versionBias),
+    currentPlatform: persona.platform,
+    sessionId: generateSessionId(),
+    pinnedModel: null,
+    
+    turnCount: 0,
+    lastRequestTime: 0,
+    lastModel: null,
+    
+    consecutiveErrors: 0,
+    circuitOpen: false,
+    circuitOpenUntil: 0,
+    tripCount: 0,
+    
+    recentErrors: [],
+    totalErrors: 0,
+    lastErrorTime: 0,
+    
+    workingDir: persona.workingDir,
+  };
+}
+
+// Initialize persona states
+const activePersonas = PERSONAS.slice(0, ACTIVE_PERSONA_COUNT);
+const personaStates = activePersonas.map(p => createPersonaState(p));
+let currentPersonaIndex = 0;
+
+// Global concurrency
+const globalState = {
   activeRequests: 0,
   requestQueue: [],
-  
-  // Error tracking
-  recentErrors: [],
-  totalErrors: 0,
-  lastErrorTime: 0,
-  
-  // Working directory (pinned per session for consistency)
-  workingDir: CONFIG.conversation.workingDirs[Math.floor(Math.random() * CONFIG.conversation.workingDirs.length)],
 };
+
+/**
+ * Select which persona handles the next request.
+ * Uses round-robin weighted by schedule availability.
+ */
+function selectPersona() {
+  const hourUTC = new Date().getUTCHours();
+  const day = new Date().getUTCDay();
+  const isWeekendDay = day === 0 || day === 6;
+  
+  // Filter to personas that are "active" at this hour
+  const available = [];
+  for (let i = 0; i < personaStates.length; i++) {
+    const ps = personaStates[i];
+    const p = ps.persona;
+    const [start, end] = p.schedule.activeHoursUTC;
+    
+    // Check if this persona is active now
+    const isActive = start < end
+      ? (hourUTC >= start && hourUTC < end)
+      : (hourUTC >= start || hourUTC < end);
+    
+    // Weekend check
+    if (isWeekendDay && !p.schedule.weekendActive) continue;
+    if (!isActive) continue;
+    
+    // Check if persona is in session break
+    if (ps.inBreak && Date.now() < ps.breakUntil) continue;
+    
+    // Check circuit breaker
+    if (ps.circuitOpen && Date.now() < ps.circuitOpenUntil) continue;
+    
+    available.push(i);
+  }
+  
+  // If no one is available, use the lead dev (always fallback)
+  if (available.length === 0) {
+    return 0;
+  }
+  
+  // Weighted by peak hours (persona in peak hours gets more requests)
+  const weighted = [];
+  for (const idx of available) {
+    const p = personaStates[idx].persona;
+    const [peakStart, peakEnd] = p.schedule.peakHoursUTC;
+    const inPeak = peakStart < peakEnd
+      ? (hourUTC >= peakStart && hourUTC < peakEnd)
+      : (hourUTC >= peakStart || hourUTC < peakEnd);
+    weighted.push({ idx, weight: inPeak ? 3 : 1 });
+  }
+  
+  // Weighted random pick
+  const total = weighted.reduce((s, w) => s + w.weight, 0);
+  let r = Math.random() * total;
+  for (const w of weighted) {
+    r -= w.weight;
+    if (r <= 0) return w.idx;
+  }
+  return weighted[0].idx;
+}
+
+// Convenience: get current state (selected per-request)
+let activePersonaIdx = 0;
+
+// Active state pointer — set per-request by selectPersona()
+// All existing code references `state` directly, this makes it work
+let state = personaStates[0];
 
 // ═══════════════════════════════════════════════════════════════════
 // HELPERS
@@ -407,11 +560,15 @@ function isWeekend() {
 }
 
 function logNormalDelay() {
+  return logNormalDelayCustom(CONFIG.delays.logNormalMu, CONFIG.delays.logNormalSigma);
+}
+
+function logNormalDelayCustom(mu, sigma) {
   // Box-Muller transform for normal distribution
   const u1 = Math.random();
   const u2 = Math.random();
   const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-  const delay = Math.exp(CONFIG.delays.logNormalMu + CONFIG.delays.logNormalSigma * z);
+  const delay = Math.exp(mu + sigma * z);
   return Math.max(CONFIG.delays.min, Math.min(delay, 15000));
 }
 
@@ -420,6 +577,9 @@ function logNormalDelay() {
 // ═══════════════════════════════════════════════════════════════════
 
 function getHumanDelay() {
+  const persona = state.persona;
+  const timing = persona?.timing || {};
+  
   if (state.isFirstRequest) {
     state.isFirstRequest = false;
     return randomInt(...CONFIG.delays.firstRequestDelay);
@@ -430,19 +590,21 @@ function getHumanDelay() {
     return randomInt(...CONFIG.delays.postErrorDelay);
   }
   
-  // Log-normal gives more realistic distribution than uniform
-  const base = CONFIG.delays.useLogNormal ? logNormalDelay() : randomFloat(CONFIG.delays.min, CONFIG.delays.max);
+  // Log-normal with persona-specific parameters
+  const mu = timing.logNormalMu || CONFIG.delays.logNormalMu;
+  const sigma = timing.logNormalSigma || CONFIG.delays.logNormalSigma;
+  const base = CONFIG.delays.useLogNormal ? logNormalDelayCustom(mu, sigma) : randomFloat(CONFIG.delays.min, CONFIG.delays.max);
   
   // Tab switch (went to browser, came back)
   if (Math.random() < CONFIG.delays.tabSwitchChance) {
     return base + randomInt(...CONFIG.delays.tabSwitchExtra);
   }
-  // Coffee/bathroom break
-  if (Math.random() < CONFIG.delays.coffeeChance) {
+  // Coffee/bathroom break (persona-specific frequency)
+  if (Math.random() < (timing.coffeeChance ?? CONFIG.delays.coffeeChance)) {
     return base + randomInt(...CONFIG.delays.coffeeExtra);
   }
-  // Thinking pause (reading code output)
-  if (Math.random() < CONFIG.delays.thinkingChance) {
+  // Thinking pause (persona-specific — juniors think more)
+  if (Math.random() < (timing.thinkingChance ?? CONFIG.delays.thinkingChance)) {
     return base + randomInt(...CONFIG.delays.thinkingExtra);
   }
   // Micro-pause within burst (eyes scanning output)
@@ -462,22 +624,24 @@ function maybeSessionRotation() {
     
     // Reset session
     state.sessionStart = state.breakUntil;
-    state.sessionTarget = randomInt(...CONFIG.sessions.duration);
+    state.sessionTarget = randomInt(...(state.persona?.sessions?.duration || CONFIG.sessions.duration));
     state.currentBurstCount = 0;
-    state.currentBurstTarget = randomInt(...CONFIG.sessions.burstSize);
+    state.currentBurstTarget = randomInt(...(state.persona?.sessions?.burstSize || CONFIG.sessions.burstSize));
     state.turnCount = 0;
     state.isFirstRequest = true;
     state.sessionId = generateSessionId();
     state.pinnedModel = null;
-    state.workingDir = CONFIG.conversation.workingDirs[Math.floor(Math.random() * CONFIG.conversation.workingDirs.length)];
+    state.workingDir = state.persona?.workingDir || CONFIG.conversation.workingDirs[Math.floor(Math.random() * CONFIG.conversation.workingDirs.length)];
     
-    // Maybe update version (auto-update between sessions)
+    // Maybe update version (auto-update between sessions) — respect persona bias
     if (Math.random() < 0.06) {
-      state.currentVersion = weightedPick(CONFIG.identity.versions);
+      const bias = state.persona?.versionBias || "recent";
+      if (bias === "latest") state.currentVersion = CONFIG.identity.versions[0].v;
+      else if (bias === "behind") state.currentVersion = CONFIG.identity.versions[randomInt(2, CONFIG.identity.versions.length - 1)].v;
+      else state.currentVersion = weightedPick(CONFIG.identity.versions);
     }
-    if (Math.random() < 0.12) {
-      state.currentPlatform = CONFIG.identity.platforms[randomInt(0, CONFIG.identity.platforms.length - 1)];
-    }
+    // Platform stays consistent per persona (don't change OS mid-user)
+    state.currentPlatform = state.persona?.platform || CONFIG.identity.platforms[randomInt(0, CONFIG.identity.platforms.length - 1)];
   }
   
   if (state.inBreak && now < state.breakUntil) {
@@ -504,9 +668,10 @@ function checkRateLimit() {
   const now = Date.now();
   state.requestTimestamps = state.requestTimestamps.filter(t => now - t < 60000);
   
-  // Adaptive rate reduction on errors
+  // Per-persona rate limits
+  const personaRates = state.persona?.rates || CONFIG.rates;
   const errorMultiplier = state.consecutiveErrors > 0 ? CONFIG.rates.errorCooldownMultiplier : 1;
-  const effectivePerMinute = Math.floor(CONFIG.rates.perMinute * errorMultiplier);
+  const effectivePerMinute = Math.floor((personaRates.perMinute || CONFIG.rates.perMinute) * errorMultiplier);
   
   if (state.requestTimestamps.length >= effectivePerMinute) {
     return { ok: false, waitMs: state.requestTimestamps[0] + 60000 - now + randomInt(500, 3000), reason: "per-minute" };
@@ -515,13 +680,13 @@ function checkRateLimit() {
   if (now > state.hourlyReset) { state.hourlyCount = 0; state.hourlyReset = now + 3600000; }
   if (now > state.dailyReset) { state.dailyCount = 0; state.dailyReset = now + 86400000; }
   
-  let hourlyLimit = isQuietHours() ? CONFIG.quietHours.maxPerHour : CONFIG.rates.perHour;
+  let hourlyLimit = isQuietHours() ? CONFIG.quietHours.maxPerHour : (personaRates.perHour || CONFIG.rates.perHour);
   if (isWeekend()) hourlyLimit = Math.floor(hourlyLimit * CONFIG.quietHours.weekendMultiplier);
   
   if (state.hourlyCount >= hourlyLimit) {
     return { ok: false, waitMs: state.hourlyReset - now + randomInt(1000, 5000), reason: "hourly" };
   }
-  if (state.dailyCount >= CONFIG.rates.perDay) {
+  if (state.dailyCount >= (personaRates.perDay || CONFIG.rates.perDay)) {
     return { ok: false, waitMs: state.dailyReset - now, reason: "daily" };
   }
   
@@ -591,29 +756,29 @@ function checkCircuitBreaker() {
 // ═══════════════════════════════════════════════════════════════════
 
 function acquireSlot() {
-  if (state.activeRequests < CONFIG.maxConcurrent) {
-    state.activeRequests++;
+  if (globalState.activeRequests < CONFIG.maxConcurrent) {
+    globalState.activeRequests++;
     return true;
   }
   return false;
 }
 
 function releaseSlot() {
-  state.activeRequests = Math.max(0, state.activeRequests - 1);
+  globalState.activeRequests = Math.max(0, globalState.activeRequests - 1);
 }
 
 export function waitForSlot() {
   return new Promise((resolve) => {
     if (acquireSlot()) return resolve();
-    state.requestQueue.push(resolve);
+    globalState.requestQueue.push(resolve);
   });
 }
 
 export function finishSlot() {
   releaseSlot();
-  if (state.requestQueue.length > 0) {
-    const next = state.requestQueue.shift();
-    state.activeRequests++;
+  if (globalState.requestQueue.length > 0) {
+    const next = globalState.requestQueue.shift();
+    globalState.activeRequests++;
     next();
   }
 }
@@ -722,7 +887,9 @@ function maybeInjectToolHistory(messages) {
   // Inject synthetic coding interaction
   for (let i = 0; i < numPairs; i++) {
     const templateFn = SYNTHETIC_TOOL_TEMPLATES[randomInt(0, SYNTHETIC_TOOL_TEMPLATES.length - 1)];
-    const file = CONFIG.conversation.fakeFiles[randomInt(0, CONFIG.conversation.fakeFiles.length - 1)];
+    // Use persona-specific files if available
+    const files = state.persona?.fakeFiles || CONFIG.conversation.fakeFiles;
+    const file = files[randomInt(0, files.length - 1)];
     const pair = templateFn(state.workingDir, file);
     
     // Fix tool_use_id reference
@@ -841,6 +1008,10 @@ export function getHeaders() {
 // ═══════════════════════════════════════════════════════════════════
 
 export async function antiBanGate() {
+  // -1. Select persona for this request
+  activePersonaIdx = selectPersona();
+  state = personaStates[activePersonaIdx];
+  
   // 0. Circuit breaker
   const cb = checkCircuitBreaker();
   if (!cb.ok) {
@@ -899,30 +1070,45 @@ export async function antiBanGate() {
 // ═══════════════════════════════════════════════════════════════════
 
 export function getStats() {
+  // Aggregate stats across all personas
+  const allMinute = personaStates.reduce((s, p) => s + p.requestTimestamps.filter(t => Date.now() - t < 60000).length, 0);
+  const allHour = personaStates.reduce((s, p) => s + p.hourlyCount, 0);
+  const allDay = personaStates.reduce((s, p) => s + p.dailyCount, 0);
+  const allErrors = personaStates.reduce((s, p) => s + p.totalErrors, 0);
+  
   return {
-    requestsLastMinute: state.requestTimestamps.filter(t => Date.now() - t < 60000).length,
-    requestsThisHour: state.hourlyCount,
-    requestsToday: state.dailyCount,
+    aggregate: {
+      requestsLastMinute: allMinute,
+      requestsThisHour: allHour,
+      requestsToday: allDay,
+      totalErrors: allErrors,
+    },
+    personas: personaStates.map(ps => ({
+      name: ps.persona.name,
+      platform: ps.currentPlatform,
+      version: ps.currentVersion,
+      requestsThisHour: ps.hourlyCount,
+      requestsToday: ps.dailyCount,
+      burstProgress: `${ps.currentBurstCount}/${ps.currentBurstTarget}`,
+      inBreak: ps.inBreak,
+      circuitBreaker: ps.circuitOpen ? `OPEN (trip #${ps.tripCount})` : "closed",
+      workingDir: ps.workingDir,
+    })),
+    activePersona: state.persona?.name || "default",
+    activePersonaCount: ACTIVE_PERSONA_COUNT,
     isQuietHours: isQuietHours(),
     isWeekend: isWeekend(),
-    inSessionBreak: state.inBreak,
-    sessionTurns: state.turnCount,
-    currentVersion: state.currentVersion,
-    currentPlatform: state.currentPlatform,
-    burstProgress: `${state.currentBurstCount}/${state.currentBurstTarget}`,
-    circuitBreaker: state.circuitOpen ? `OPEN (trip #${state.tripCount})` : "closed",
-    consecutiveErrors: state.consecutiveErrors,
-    totalErrors: state.totalErrors,
-    activeRequests: state.activeRequests,
-    queuedRequests: state.requestQueue.length,
+    activeRequests: globalState.activeRequests,
+    queuedRequests: globalState.requestQueue.length,
     stealth: {
       toolsInjected: true,
       promptRewritten: true,
       streamingForced: true,
-      modelPinned: state.pinnedModel || "none",
       historyInjection: true,
       concurrencyLimited: true,
       circuitBreakerActive: true,
+      multiPersona: true,
+      personaCount: ACTIVE_PERSONA_COUNT,
     },
   };
 }
