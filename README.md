@@ -1,37 +1,38 @@
-# Claude OAuth Proxy
+# Claude OAuth Proxy + Anti-Ban Engine
 
-A zero-dependency Node.js proxy that lets you use your **Claude Pro/Max subscription** as a standard Anthropic API endpoint. Any app that speaks the Anthropic API can use it — just point it at `http://localhost:4321`.
+A local proxy that uses your Claude Pro/Max subscription as a standard Anthropic API endpoint, with built-in anti-detection stealth layer.
 
-## How It Works
+## Features
 
-1. Generate a long-lived OAuth token with `claude setup-token` (Claude Code CLI)
-2. Start the proxy — it handles all the Claude Code impersonation headers
-3. Any request to `localhost:4321/v1/messages` gets forwarded to `api.anthropic.com` with proper OAuth authentication
-4. Your app doesn't need to know about OAuth — it works like a normal API key
+### Core Proxy
+- **OAuth Authentication** — Uses Claude setup-token for subscription access
+- **Full API Compatibility** — Drop-in replacement for Anthropic API
+- **Streaming Support** — Full SSE streaming passthrough
+- **PM2 Ready** — Production-grade process management
 
-### What the proxy does behind the scenes
+### 🛡️ Anti-Ban Engine
+Makes proxy traffic **indistinguishable** from real Claude Code CLI usage:
 
-- Sets the `Authorization: Bearer <token>` header (OAuth uses Bearer, not x-api-key)
-- Adds Claude Code identity headers (`user-agent`, `x-app`, `anthropic-beta` flags)
-- Injects the required system prompt prefix (`"You are Claude Code..."`) if missing
-- Passes everything else through transparently, including streaming
-
-## Requirements
-
-- Node.js 20+ (uses Web Crypto API and native fetch)
-- A Claude Pro or Max subscription
-- A setup-token from `claude setup-token`
+| Layer | What it does |
+|-------|-------------|
+| **Human Timing** | Random delays (0.6-3.2s), thinking pauses, coffee breaks, session patterns |
+| **Tool Injection** | Injects real Claude Code tool definitions (Bash, Read, Write, Edit, Glob, Grep, etc.) |
+| **System Prompt** | Rewrites system prompt to match Claude Code's exact format and structure |
+| **Header Fingerprint** | Rotates CLI version, platform strings, includes all telemetry headers |
+| **Session Simulation** | Coding bursts (3-10 req) → pause → burst. Sessions with natural breaks |
+| **Quiet Hours** | Reduced activity during configurable sleep hours (default: 21:00-04:00 UTC) |
+| **Rate Governance** | Per-minute (8), per-hour (100), per-day (600) limits matching human capacity |
 
 ## Quick Start
 
 ```bash
-# 1. Generate a token (in Claude Code)
+# 1. Generate a setup token (requires Claude Code CLI)
 claude setup-token
 
 # 2. Start the proxy
 node proxy.mjs --token sk-ant-oat01-your-token-here
 
-# 3. Use it (in another terminal)
+# 3. Use it
 curl http://localhost:4321/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: anything" \
@@ -43,61 +44,78 @@ curl http://localhost:4321/v1/messages \
   }'
 ```
 
-## Commands
+## Production Setup (PM2)
 
-| Command | Description |
-|---|---|
-| `node proxy.mjs` | Start the proxy |
-| `node proxy.mjs --token <token>` | Start with token (saves for next time) |
-| `node proxy.mjs status` | Check token configuration |
-| `node proxy.mjs help` | Show help |
-
-## Token Sources
-
-The proxy checks for a token in this order:
-
-1. `--token` CLI flag
-2. `CLAUDE_CODE_OAUTH_TOKEN` environment variable
-3. Saved token in `~/.config/claude-oauth-proxy/token`
-4. Interactive prompt (saved for next time)
-
-## Configuration
-
-| Env Var | Default | Description |
-|---|---|---|
-| `PORT` | `4321` | Proxy listen port |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token (alternative to --token) |
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+```
 
 ## Endpoints
 
-All `/v1/*` paths are proxied to Anthropic, including:
-
 | Path | Description |
-|---|---|
-| `/v1/messages` | Chat completions (streaming supported) |
-| `/v1/messages/count_tokens` | Token counting |
-| `/health` | Proxy status |
+|------|-------------|
+| `GET /health` | Proxy status + anti-ban stats |
+| `POST /v1/messages` | Chat completions (streaming supported) |
+| `POST /v1/messages/count_tokens` | Token counting |
 
-## Technical Details
+## Configuration
 
-### Claude Code Impersonation
+### Token Sources (checked in order)
+1. `--token` CLI flag
+2. `CLAUDE_CODE_OAUTH_TOKEN` environment variable
+3. Saved token in `~/.config/claude-oauth-proxy/token`
+4. Interactive prompt
 
-For OAuth tokens to work, the request must look like it's coming from Claude Code. The proxy handles this by:
+### Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `4321` | Proxy listen port |
+| `HOST` | `127.0.0.1` | Bind address |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token |
 
-1. **Headers**: Sets `user-agent: claude-cli/2.1.2 (external, cli)`, `x-app: cli`, and required `anthropic-beta` flags
-2. **Auth**: Uses `Authorization: Bearer <token>` instead of `x-api-key` header
-3. **System prompt**: Prepends `"You are Claude Code, Anthropic's official CLI for Claude."` to the system prompt if not already present
-4. **Beta features**: Includes `claude-code-20250219`, `oauth-2025-04-20`, `fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`
+### Anti-Ban Tuning
 
-### Security
+Edit the `CONFIG` object in `anti-ban.mjs` to adjust:
+- Delay ranges and probabilities
+- Rate limits per minute/hour/day
+- Session burst size and break duration
+- Quiet hours (timezone)
+- Claude Code version pool
 
-- **Binds to 127.0.0.1 only** — not accessible from other machines
+## How It Works
+
+```
+Your App → Proxy (anti-ban gate) → Anthropic API
+              ↓
+    1. Rate limit check
+    2. Session simulation delay
+    3. Human thinking delay
+    4. Tool definition injection
+    5. System prompt rewrite
+    6. Header fingerprint rotation
+    7. Forward with OAuth Bearer auth
+```
+
+Every request that reaches Anthropic looks exactly like a real Claude Code CLI session:
+- Correct user-agent and telemetry headers
+- Full Claude Code tool definitions attached
+- System prompt matches Claude Code's format
+- Request timing follows human patterns
+
+## Security
+
+- Binds to `127.0.0.1` only — not accessible from other machines
+- Token stored with `0600` permissions
+- No data logging — only method, path, status, and model name
 - Client API keys are ignored (any value works, it's localhost)
-- Token file created with 0600 permissions
-- No data logging — only method, path, status code, and model name
 
-## ⚠️ Disclaimer
+## Disclaimer
 
-This uses the same OAuth client ID and headers as Claude Code. It is **not officially sanctioned** by Anthropic for third-party use. Anthropic could change the required headers, rotate the client identity, or block this approach at any time.
+This uses the same OAuth client ID and headers as Claude Code. It is **not officially sanctioned** by Anthropic. They could change required headers, rotate client identity, or block this approach at any time.
 
-The setup-token is valid for ~1 year but can be revoked. Always have a regular API key as a fallback plan.
+The setup-token is valid for ~1 year but can be revoked. Always have a regular API key as a fallback.
+
+## License
+
+MIT

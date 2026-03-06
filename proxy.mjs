@@ -26,6 +26,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { antiBanGate, getStats, transformRequest } from "./anti-ban.mjs";
 
 // --- Load .env file ---
 
@@ -206,6 +207,7 @@ function startProxy(port, token) {
         status: "ok",
         requests_served: requestCount,
         token_prefix: token.slice(0, 15) + "...",
+        antiBan: getStats(),
       }));
       return;
     }
@@ -226,14 +228,34 @@ function startProxy(port, token) {
     const rawBody = Buffer.concat(chunks);
 
     try {
-      // Transform the body to include Claude Code system prompt
+      // --- Anti-Ban Gate ---
+      const gate = await antiBanGate();
+      if (!gate.proceed) {
+        console.log(`⏸  Anti-ban: ${gate.reason}`);
+        res.writeHead(429, { 
+          "Content-Type": "application/json",
+          "Retry-After": Math.ceil(gate.waitMs / 1000).toString(),
+        });
+        res.end(JSON.stringify({
+          type: "error",
+          error: {
+            type: "rate_limit_error",
+            message: gate.reason,
+            retry_after_ms: gate.waitMs,
+          },
+        }));
+        return;
+      }
+
+      // Transform the body: system prompt + tool injection + Claude Code fingerprint
       const transformedBody = req.method === "POST"
-        ? ensureClaudeCodeSystemPrompt(rawBody.toString())
+        ? transformRequest(rawBody.toString())
         : undefined;
 
-      // Build upstream headers — Claude Code style
+      // Build upstream headers — Claude Code style, with anti-ban variation
       const upstreamHeaders = {
         ...CLAUDE_CODE_HEADERS,
+        ...gate.headers, // Anti-ban varied headers (user-agent rotation etc)
         "content-type": req.headers["content-type"] || "application/json",
         "authorization": `Bearer ${token}`,
       };
