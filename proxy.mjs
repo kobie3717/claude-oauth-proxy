@@ -26,7 +26,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { antiBanGate, getStats, transformRequest } from "./anti-ban.mjs";
+import { antiBanGate, getStats, transformRequest, recordError, recordSuccess, analyzeResponse, finishSlot } from "./anti-ban.mjs";
 
 // --- Load .env file ---
 
@@ -294,7 +294,11 @@ function startProxy(port, token) {
 
       res.writeHead(upstreamRes.status, responseHeaders);
 
-      // Stream the response
+      // Stream the response + capture first chunk for ban detection
+      let firstChunk = "";
+      let capturedBytes = 0;
+      const CAPTURE_LIMIT = 512;
+
       if (upstreamRes.body) {
         const reader = upstreamRes.body.getReader();
         try {
@@ -302,6 +306,11 @@ function startProxy(port, token) {
             const { done, value } = await reader.read();
             if (done) break;
             res.write(value);
+            // Capture beginning of response for ban signal analysis
+            if (capturedBytes < CAPTURE_LIMIT) {
+              firstChunk += new TextDecoder().decode(value).slice(0, CAPTURE_LIMIT - capturedBytes);
+              capturedBytes += value.length;
+            }
           }
         } catch (err) {
           if (!res.destroyed) {
@@ -313,27 +322,36 @@ function startProxy(port, token) {
       res.end();
       requestCount++;
 
+      // Release concurrency slot
+      if (gate._releaseSlot) gate._releaseSlot();
+
+      // Analyze response for ban signals
+      const status = upstreamRes.status;
+      const signals = analyzeResponse(status, upstreamRes.headers, firstChunk);
+
+      if (signals.isBan) {
+        recordError(status);
+        console.error(`🚨 BAN SIGNAL: ${signals.signal} (status ${status})`);
+      } else if (signals.isThrottle) {
+        recordError(status);
+        console.warn(`⚠️  THROTTLE: ${signals.signal} (status ${status})`);
+      } else if (status >= 200 && status < 300) {
+        recordSuccess();
+      } else if (status >= 400) {
+        recordError(status);
+      }
+
       // Log
       const model = (() => {
         try { return JSON.parse(rawBody.toString()).model || "?"; } catch { return "?"; }
       })();
-      const stream = (() => {
-        try { return JSON.parse(rawBody.toString()).stream ? " [stream]" : ""; } catch { return ""; }
-      })();
-      const status = upstreamRes.status;
       const statusIcon = status >= 200 && status < 300 ? "✓" : "✗";
-      console.log(`${statusIcon} ${req.method} ${req.url} → ${status} (${model}${stream})`);
-
-      // Log errors in detail
-      if (status >= 400 && transformedBody) {
-        try {
-          const errBody = [];
-          // Re-read isn't possible, but for 4xx we can check the response
-          // The response was already streamed, so just note it
-        } catch {}
-      }
+      const stats = getStats();
+      console.log(`${statusIcon} ${req.method} ${req.url} → ${status} (${model}) [${stats.requestsThisHour}/hr, burst ${stats.burstProgress}]`);
 
     } catch (err) {
+      // Release slot on error
+      if (typeof finishSlot === 'function') finishSlot();
       console.error(`✗ Proxy error: ${err.message}`);
       if (!res.headersSent) {
         res.writeHead(502, { "Content-Type": "application/json" });

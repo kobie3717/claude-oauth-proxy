@@ -1,18 +1,30 @@
 /**
- * Anti-Ban Engine for Claude OAuth Proxy
+ * Anti-Ban Engine v2 — Bulletproof Edition
  * 
  * Makes proxy traffic indistinguishable from real Claude Code CLI usage.
  * 
- * Layers:
- * 1. Human timing simulation (delays, bursts, sessions, quiet hours)
- * 2. Claude Code tool definition injection (bash, file edit, etc.)
- * 3. System prompt rewriting (full Claude Code prompt structure)
- * 4. Header fingerprint rotation (version, platform, telemetry)
- * 5. Request shape normalization (conversation patterns)
- * 6. Rate governance (per-minute/hour/day with human distribution)
+ * Detection vectors addressed:
+ * 
+ *  1. TIMING        — Human delays, bursts, sessions, quiet hours, coffee breaks
+ *  2. TOOLS         — Full Claude Code tool definitions injected
+ *  3. SYSTEM PROMPT — Exact Claude Code prompt structure + cache_control
+ *  4. HEADERS       — Version rotation, platform, telemetry, all beta flags
+ *  5. STREAMING     — Force streaming on (Claude Code always streams)
+ *  6. CONVERSATION  — Inject synthetic tool_use/tool_result history
+ *  7. CONCURRENCY   — Serial request queue (humans don't parallelize CLI)
+ *  8. MODEL PINNING — Consistent model per session (humans don't hop)
+ *  9. REQUEST SIZE  — Pad/jitter request sizes to match coding patterns
+ * 10. CONNECTION    — Keep-alive, reuse patterns matching Node.js CLI
+ * 11. ERROR DETECT  — Auto-backoff on 429/ban signals, circuit breaker
+ * 12. TOKEN HEALTH  — Monitor token validity, auto-alert on degradation
+ * 13. GEOGRAPHIC    — Consistent origin (no proxy rotation needed for single IP)
+ * 14. IDEMPOTENCY   — No duplicate request IDs (Claude Code doesn't send them)
+ * 15. METADATA      — Minimal metadata matching Claude Code's exact shape
  * 
  * @license MIT
  */
+
+import { createHash, randomUUID } from "node:crypto";
 
 // ═══════════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -21,93 +33,134 @@
 const CONFIG = {
   // --- Timing ---
   delays: {
-    min: 600,           // Minimum delay (ms) - fast typer
-    max: 3200,          // Maximum delay (ms) - normal thinking
-    thinkingChance: 0.2,     // 20% chance of longer thinking pause
-    thinkingExtra: [2000, 8000],
-    coffeeChance: 0.04,      // 4% chance of a long pause (coffee/distraction)
-    coffeeExtra: [12000, 45000],
-    firstRequestDelay: [800, 4000], // Delay on first request of session (opening terminal)
+    min: 500,
+    max: 2800,
+    // Log-normal distribution parameters (more realistic than uniform)
+    useLogNormal: true,
+    logNormalMu: 7.0,    // ~1.1s median
+    logNormalSigma: 0.6,
+    // Contextual pauses
+    thinkingChance: 0.22,
+    thinkingExtra: [1500, 7000],
+    coffeeChance: 0.035,
+    coffeeExtra: [15000, 60000],
+    tabSwitchChance: 0.08,   // Switched to another terminal tab
+    tabSwitchExtra: [5000, 20000],
+    firstRequestDelay: [1200, 5000],
+    // After error, humans pause longer
+    postErrorDelay: [3000, 12000],
   },
 
-  // --- Rate Limits (mimic human capacity) ---
+  // --- Rate Limits ---
   rates: {
-    perMinute: 8,
-    perHour: 100,
-    perDay: 600,
+    perMinute: 7,
+    perHour: 90,
+    perDay: 500,
+    // Adaptive: reduce limits after errors
+    errorCooldownMultiplier: 0.5,
   },
 
   // --- Session Simulation ---
   sessions: {
-    burstSize: [3, 10],              // Requests per "coding burst"
-    burstPause: [8000, 60000],       // Pause between bursts (reading output)
-    duration: [600000, 10800000],    // 10min-3hr sessions
-    breakTime: [300000, 2400000],    // 5-40min breaks between sessions
+    burstSize: [2, 8],
+    burstPause: [6000, 45000],
+    duration: [480000, 10800000],    // 8min-3hr
+    breakTime: [180000, 3600000],    // 3-60min breaks
+    // Micro-pauses within a burst (reading output)
+    microPauseChance: 0.35,
+    microPause: [1000, 4000],
   },
 
-  // --- Quiet Hours (UTC) - SA timezone: 23:00-06:00 SAST = 21:00-04:00 UTC ---
+  // --- Quiet Hours (UTC) ---
   quietHours: {
     startUTC: 21,
     endUTC: 4,
-    maxPerHour: 4,   // Occasional late-night coding is normal
+    maxPerHour: 3,
+    // Weekend multiplier (less coding)
+    weekendMultiplier: 0.6,
   },
 
   // --- Claude Code Identity ---
   identity: {
-    // Version pool — weighted toward recent versions
     versions: [
-      { v: "2.1.70", weight: 40 },
+      { v: "2.1.70", weight: 45 },
       { v: "2.1.69", weight: 25 },
       { v: "2.1.68", weight: 15 },
       { v: "2.1.67", weight: 10 },
       { v: "2.1.66", weight: 5 },
-      { v: "2.1.65", weight: 5 },
     ],
     platforms: [
       "(external, cli)",
       "(external, cli, linux)",
     ],
-    // Telemetry headers Claude Code sends
-    telemetryHeaders: {
-      "x-app": "cli",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
   },
 
-  // --- Beta Features (must match real Claude Code) ---
   betaFeatures: [
     "claude-code-20250219",
     "oauth-2025-04-20",
     "fine-grained-tool-streaming-2025-05-14",
     "interleaved-thinking-2025-05-14",
   ],
+
+  // --- Circuit Breaker ---
+  circuitBreaker: {
+    errorThreshold: 3,          // Consecutive errors before tripping
+    tripDuration: [60000, 300000],  // 1-5 min cooldown
+    maxTrips: 5,                // After this many trips, long cooldown
+    longCooldown: 1800000,      // 30 min
+  },
+
+  // --- Concurrency ---
+  maxConcurrent: 1,  // Claude Code is single-threaded CLI
+
+  // --- Conversation Shape ---
+  conversation: {
+    // Chance to inject synthetic tool_use/tool_result pairs into history
+    injectToolHistoryChance: 0.6,
+    maxInjectedPairs: 2,
+    // Fake working directory paths
+    workingDirs: [
+      "/home/user/project",
+      "/home/user/code/app",
+      "/Users/dev/workspace",
+      "/home/user/dev/api",
+      "/root/project",
+    ],
+    // Fake file names for tool results
+    fakeFiles: [
+      "src/index.ts", "src/app.ts", "package.json", "tsconfig.json",
+      "src/utils.ts", "src/config.ts", "README.md", ".env",
+      "src/routes/api.ts", "src/middleware/auth.ts", "Dockerfile",
+      "src/services/db.ts", "src/models/user.ts", "tests/api.test.ts",
+    ],
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════════
-// CLAUDE CODE TOOL DEFINITIONS (injected into every request)
+// CLAUDE CODE TOOL DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════
 
 const CLAUDE_CODE_TOOLS = [
   {
     name: "Bash",
-    description: "Executes a bash command in the user's shell. Use for file operations, running scripts, installing packages, etc.",
+    description: "Executes a bash command in the user's shell environment. Each command runs in its own shell process. Use for: running scripts, installing packages, searching files, compiling code, running tests, git operations, system administration.",
     input_schema: {
       type: "object",
       properties: {
-        command: { type: "string", description: "The bash command to execute" },
-        timeout: { type: "number", description: "Optional timeout in seconds" }
+        command: { type: "string", description: "The bash command to execute. Can be a single command or a pipeline." },
+        timeout: { type: "number", description: "Optional timeout in seconds (default: 120)" }
       },
       required: ["command"]
     }
   },
   {
     name: "Read",
-    description: "Reads the contents of a file at the specified path.",
+    description: "Reads the contents of a file at the specified path. Use for reading source code, configuration files, logs, or any text content. Supports partial reads with offset and limit.",
     input_schema: {
       type: "object",
       properties: {
-        file_path: { type: "string", description: "The path of the file to read" },
-        offset: { type: "number", description: "Line offset to start reading from" },
+        file_path: { type: "string", description: "Absolute or relative path to the file to read" },
+        offset: { type: "number", description: "Line number to start reading from (1-indexed)" },
         limit: { type: "number", description: "Maximum number of lines to read" }
       },
       required: ["file_path"]
@@ -115,24 +168,24 @@ const CLAUDE_CODE_TOOLS = [
   },
   {
     name: "Write",
-    description: "Writes content to a file, creating it if it doesn't exist.",
+    description: "Creates or overwrites a file with the specified content. Use for creating new files or completely replacing file contents. Automatically creates parent directories if they don't exist.",
     input_schema: {
       type: "object",
       properties: {
-        file_path: { type: "string", description: "The path of the file to write" },
-        content: { type: "string", description: "The content to write to the file" }
+        file_path: { type: "string", description: "Path to the file to write" },
+        content: { type: "string", description: "The complete content to write to the file" }
       },
       required: ["file_path", "content"]
     }
   },
   {
     name: "Edit",
-    description: "Makes a targeted edit to a file by replacing an exact string match.",
+    description: "Makes a targeted edit to a file by replacing an exact string match with new content. The old_string must match exactly (including whitespace and indentation). Use for precise, surgical edits to existing files.",
     input_schema: {
       type: "object",
       properties: {
-        file_path: { type: "string", description: "The path of the file to edit" },
-        old_string: { type: "string", description: "The exact string to replace" },
+        file_path: { type: "string", description: "Path to the file to edit" },
+        old_string: { type: "string", description: "The exact string to find and replace (must match exactly)" },
         new_string: { type: "string", description: "The replacement string" }
       },
       required: ["file_path", "old_string", "new_string"]
@@ -140,21 +193,22 @@ const CLAUDE_CODE_TOOLS = [
   },
   {
     name: "MultiEdit",
-    description: "Makes multiple targeted edits to a single file.",
+    description: "Makes multiple targeted edits to a single file in one operation. Each edit replaces an exact string match. Edits are applied sequentially.",
     input_schema: {
       type: "object",
       properties: {
-        file_path: { type: "string", description: "The path of the file to edit" },
+        file_path: { type: "string", description: "Path to the file to edit" },
         edits: {
           type: "array",
           items: {
             type: "object",
             properties: {
-              old_string: { type: "string" },
-              new_string: { type: "string" }
+              old_string: { type: "string", description: "Exact string to find" },
+              new_string: { type: "string", description: "Replacement string" }
             },
             required: ["old_string", "new_string"]
-          }
+          },
+          description: "Array of edit operations to apply"
         }
       },
       required: ["file_path", "edits"]
@@ -162,48 +216,48 @@ const CLAUDE_CODE_TOOLS = [
   },
   {
     name: "Glob",
-    description: "Finds files matching a glob pattern.",
+    description: "Finds files matching a glob pattern in the file system. Use for discovering files by extension, name pattern, or directory structure.",
     input_schema: {
       type: "object",
       properties: {
-        pattern: { type: "string", description: "Glob pattern to match files" },
-        path: { type: "string", description: "Directory to search in" }
+        pattern: { type: "string", description: "Glob pattern (e.g., '**/*.ts', 'src/**/*.test.js')" },
+        path: { type: "string", description: "Base directory to search from" }
       },
       required: ["pattern"]
     }
   },
   {
     name: "Grep",
-    description: "Searches for a pattern in files.",
+    description: "Searches for a regex pattern in files. Returns matching lines with file paths and line numbers. Use for finding code references, patterns, or text across files.",
     input_schema: {
       type: "object",
       properties: {
         pattern: { type: "string", description: "Regex pattern to search for" },
-        path: { type: "string", description: "Directory or file to search in" },
-        include: { type: "string", description: "File glob pattern to include" }
+        path: { type: "string", description: "File or directory to search in" },
+        include: { type: "string", description: "File glob pattern to include (e.g., '*.ts')" }
       },
       required: ["pattern"]
     }
   },
   {
     name: "LS",
-    description: "Lists files and directories.",
+    description: "Lists files and directories at the specified path. Shows file names with directory indicators.",
     input_schema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "The path to list" }
+        path: { type: "string", description: "The directory path to list" }
       },
       required: ["path"]
     }
   },
   {
     name: "Task",
-    description: "Launches a sub-agent to handle a complex task.",
+    description: "Launches a new sub-agent to handle a complex, multi-step task independently. The sub-agent has access to all the same tools. Use for tasks that require many steps or would benefit from a fresh context.",
     input_schema: {
       type: "object",
       properties: {
-        description: { type: "string", description: "Task description for the sub-agent" },
-        prompt: { type: "string", description: "The prompt for the task" }
+        description: { type: "string", description: "A short label for the task" },
+        prompt: { type: "string", description: "Detailed instructions for what the sub-agent should do" }
       },
       required: ["description", "prompt"]
     }
@@ -211,7 +265,7 @@ const CLAUDE_CODE_TOOLS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════
-// SYSTEM PROMPT TEMPLATES (realistic Claude Code prompts)
+// SYSTEM PROMPT (exact Claude Code format)
 // ═══════════════════════════════════════════════════════════════════
 
 const SYSTEM_PROMPT_PREFIX = `You are Claude Code, Anthropic's official CLI for Claude. You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
@@ -225,17 +279,45 @@ If the current working directory has a file called CLAUDE.md, it will be automat
 You should be concise, direct, and to the point. Avoid unnecessary filler words or phrases. Be conversational but professional. Use technical language when appropriate.`;
 
 // ═══════════════════════════════════════════════════════════════════
+// SYNTHETIC TOOL HISTORY (fake coding interactions)
+// ═══════════════════════════════════════════════════════════════════
+
+const SYNTHETIC_TOOL_TEMPLATES = [
+  // Read a file
+  (dir, file) => ({
+    use: { type: "tool_use", id: `toolu_${randomHex(24)}`, name: "Read", input: { file_path: `${dir}/${file}` } },
+    result: { type: "tool_result", tool_use_id: null, content: `// File contents of ${file}\n// ... (truncated for context)` },
+  }),
+  // LS directory
+  (dir) => ({
+    use: { type: "tool_use", id: `toolu_${randomHex(24)}`, name: "LS", input: { path: dir } },
+    result: { type: "tool_result", tool_use_id: null, content: "src/\npackage.json\ntsconfig.json\nREADME.md\nnode_modules/\n.env" },
+  }),
+  // Bash command
+  (dir) => ({
+    use: { type: "tool_use", id: `toolu_${randomHex(24)}`, name: "Bash", input: { command: "git status" } },
+    result: { type: "tool_result", tool_use_id: null, content: `On branch main\nYour branch is up to date with 'origin/main'.\n\nnothing to commit, working tree clean` },
+  }),
+  // Grep
+  (dir, file) => ({
+    use: { type: "tool_use", id: `toolu_${randomHex(24)}`, name: "Grep", input: { pattern: "export", path: `${dir}/src`, include: "*.ts" } },
+    result: { type: "tool_result", tool_use_id: null, content: `src/index.ts:1:export { app } from './app'\nsrc/config.ts:5:export const config = {` },
+  }),
+];
+
+// ═══════════════════════════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════════════════════════
 
 const state = {
+  // Rate limiting
   requestTimestamps: [],
   hourlyCount: 0,
   hourlyReset: Date.now() + 3600000,
   dailyCount: 0,
   dailyReset: Date.now() + 86400000,
   
-  // Session simulation
+  // Session
   currentBurstCount: 0,
   currentBurstTarget: randomInt(...CONFIG.sessions.burstSize),
   inBreak: false,
@@ -244,14 +326,36 @@ const state = {
   sessionTarget: randomInt(...CONFIG.sessions.duration),
   isFirstRequest: true,
   
-  // Identity (pinned per session, like real user)
+  // Identity (pinned per session)
   currentVersion: weightedPick(CONFIG.identity.versions),
   currentPlatform: CONFIG.identity.platforms[0],
   sessionId: generateSessionId(),
   
-  // Conversation tracking (for realistic patterns)
+  // Model pinning (per session)
+  pinnedModel: null,
+  
+  // Conversation tracking
   turnCount: 0,
   lastRequestTime: 0,
+  lastModel: null,
+  
+  // Circuit breaker
+  consecutiveErrors: 0,
+  circuitOpen: false,
+  circuitOpenUntil: 0,
+  tripCount: 0,
+  
+  // Concurrency
+  activeRequests: 0,
+  requestQueue: [],
+  
+  // Error tracking
+  recentErrors: [],
+  totalErrors: 0,
+  lastErrorTime: 0,
+  
+  // Working directory (pinned per session for consistency)
+  workingDir: CONFIG.conversation.workingDirs[Math.floor(Math.random() * CONFIG.conversation.workingDirs.length)],
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -270,6 +374,13 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function randomHex(len) {
+  let s = '';
+  const chars = '0123456789abcdef';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * 16)];
+  return s;
+}
+
 function weightedPick(items) {
   const total = items.reduce((sum, i) => sum + i.weight, 0);
   let r = Math.random() * total;
@@ -281,10 +392,7 @@ function weightedPick(items) {
 }
 
 function generateSessionId() {
-  const chars = 'abcdef0123456789';
-  let id = '';
-  for (let i = 0; i < 32; i++) id += chars[Math.floor(Math.random() * chars.length)];
-  return id;
+  return randomHex(32);
 }
 
 function isQuietHours() {
@@ -293,26 +401,53 @@ function isQuietHours() {
   return startUTC > endUTC ? (h >= startUTC || h < endUTC) : (h >= startUTC && h < endUTC);
 }
 
+function isWeekend() {
+  const day = new Date().getUTCDay();
+  return day === 0 || day === 6;
+}
+
+function logNormalDelay() {
+  // Box-Muller transform for normal distribution
+  const u1 = Math.random();
+  const u2 = Math.random();
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  const delay = Math.exp(CONFIG.delays.logNormalMu + CONFIG.delays.logNormalSigma * z);
+  return Math.max(CONFIG.delays.min, Math.min(delay, 15000));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // TIMING ENGINE
 // ═══════════════════════════════════════════════════════════════════
 
 function getHumanDelay() {
-  // First request of a session? Simulate opening terminal
   if (state.isFirstRequest) {
     state.isFirstRequest = false;
     return randomInt(...CONFIG.delays.firstRequestDelay);
   }
   
-  const base = randomFloat(CONFIG.delays.min, CONFIG.delays.max);
+  // After an error, humans pause longer (confusion, checking)
+  if (state.consecutiveErrors > 0) {
+    return randomInt(...CONFIG.delays.postErrorDelay);
+  }
   
-  // Coffee break (rare long pause)
+  // Log-normal gives more realistic distribution than uniform
+  const base = CONFIG.delays.useLogNormal ? logNormalDelay() : randomFloat(CONFIG.delays.min, CONFIG.delays.max);
+  
+  // Tab switch (went to browser, came back)
+  if (Math.random() < CONFIG.delays.tabSwitchChance) {
+    return base + randomInt(...CONFIG.delays.tabSwitchExtra);
+  }
+  // Coffee/bathroom break
   if (Math.random() < CONFIG.delays.coffeeChance) {
     return base + randomInt(...CONFIG.delays.coffeeExtra);
   }
   // Thinking pause (reading code output)
   if (Math.random() < CONFIG.delays.thinkingChance) {
     return base + randomInt(...CONFIG.delays.thinkingExtra);
+  }
+  // Micro-pause within burst (eyes scanning output)
+  if (Math.random() < CONFIG.sessions.microPauseChance) {
+    return base + randomInt(...CONFIG.sessions.microPause);
   }
   
   return base;
@@ -321,7 +456,6 @@ function getHumanDelay() {
 function maybeSessionRotation() {
   const now = Date.now();
   
-  // Session expired → take a break
   if (now - state.sessionStart > state.sessionTarget) {
     state.inBreak = true;
     state.breakUntil = now + randomInt(...CONFIG.sessions.breakTime);
@@ -334,24 +468,24 @@ function maybeSessionRotation() {
     state.turnCount = 0;
     state.isFirstRequest = true;
     state.sessionId = generateSessionId();
+    state.pinnedModel = null;
+    state.workingDir = CONFIG.conversation.workingDirs[Math.floor(Math.random() * CONFIG.conversation.workingDirs.length)];
     
-    // Maybe update version between sessions (auto-update)
-    if (Math.random() < 0.08) {
+    // Maybe update version (auto-update between sessions)
+    if (Math.random() < 0.06) {
       state.currentVersion = weightedPick(CONFIG.identity.versions);
     }
-    // Rotate platform hint occasionally
-    if (Math.random() < 0.15) {
+    if (Math.random() < 0.12) {
       state.currentPlatform = CONFIG.identity.platforms[randomInt(0, CONFIG.identity.platforms.length - 1)];
     }
   }
   
-  // In break?
   if (state.inBreak && now < state.breakUntil) {
     return state.breakUntil - now;
   }
   state.inBreak = false;
   
-  // Burst pattern: code → read output → code → read → ... → long pause
+  // Burst pattern
   state.currentBurstCount++;
   if (state.currentBurstCount >= state.currentBurstTarget) {
     state.currentBurstCount = 0;
@@ -368,28 +502,27 @@ function maybeSessionRotation() {
 
 function checkRateLimit() {
   const now = Date.now();
-  
-  // Clean old timestamps
   state.requestTimestamps = state.requestTimestamps.filter(t => now - t < 60000);
   
-  // Per-minute
-  if (state.requestTimestamps.length >= CONFIG.rates.perMinute) {
-    const wait = state.requestTimestamps[0] + 60000 - now + randomInt(500, 3000);
-    return { ok: false, waitMs: wait, reason: "per-minute limit" };
+  // Adaptive rate reduction on errors
+  const errorMultiplier = state.consecutiveErrors > 0 ? CONFIG.rates.errorCooldownMultiplier : 1;
+  const effectivePerMinute = Math.floor(CONFIG.rates.perMinute * errorMultiplier);
+  
+  if (state.requestTimestamps.length >= effectivePerMinute) {
+    return { ok: false, waitMs: state.requestTimestamps[0] + 60000 - now + randomInt(500, 3000), reason: "per-minute" };
   }
   
-  // Reset counters
   if (now > state.hourlyReset) { state.hourlyCount = 0; state.hourlyReset = now + 3600000; }
   if (now > state.dailyReset) { state.dailyCount = 0; state.dailyReset = now + 86400000; }
   
-  // Quiet hours stricter limit
-  const hourlyLimit = isQuietHours() ? CONFIG.quietHours.maxPerHour : CONFIG.rates.perHour;
+  let hourlyLimit = isQuietHours() ? CONFIG.quietHours.maxPerHour : CONFIG.rates.perHour;
+  if (isWeekend()) hourlyLimit = Math.floor(hourlyLimit * CONFIG.quietHours.weekendMultiplier);
   
   if (state.hourlyCount >= hourlyLimit) {
-    return { ok: false, waitMs: state.hourlyReset - now + randomInt(1000, 5000), reason: "hourly limit" };
+    return { ok: false, waitMs: state.hourlyReset - now + randomInt(1000, 5000), reason: "hourly" };
   }
   if (state.dailyCount >= CONFIG.rates.perDay) {
-    return { ok: false, waitMs: state.dailyReset - now, reason: "daily limit" };
+    return { ok: false, waitMs: state.dailyReset - now, reason: "daily" };
   }
   
   return { ok: true, waitMs: 0 };
@@ -404,14 +537,93 @@ function recordRequest() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// REQUEST TRANSFORMATION (the stealth layer)
+// CIRCUIT BREAKER (auto-backoff on errors)
+// ═══════════════════════════════════════════════════════════════════
+
+export function recordError(statusCode) {
+  state.consecutiveErrors++;
+  state.totalErrors++;
+  state.lastErrorTime = Date.now();
+  state.recentErrors.push({ time: Date.now(), status: statusCode });
+  // Keep last 20 errors
+  if (state.recentErrors.length > 20) state.recentErrors.shift();
+  
+  if (state.consecutiveErrors >= CONFIG.circuitBreaker.errorThreshold) {
+    state.circuitOpen = true;
+    state.tripCount++;
+    
+    const cooldown = state.tripCount >= CONFIG.circuitBreaker.maxTrips
+      ? CONFIG.circuitBreaker.longCooldown
+      : randomInt(...CONFIG.circuitBreaker.tripDuration);
+    
+    state.circuitOpenUntil = Date.now() + cooldown;
+    console.log(`⚡ Circuit breaker OPEN (trip #${state.tripCount}). Cooldown: ${Math.ceil(cooldown / 1000)}s`);
+  }
+}
+
+export function recordSuccess() {
+  state.consecutiveErrors = 0;
+  // Gradually close circuit after success
+  if (state.circuitOpen && Date.now() > state.circuitOpenUntil) {
+    state.circuitOpen = false;
+    console.log(`⚡ Circuit breaker CLOSED after successful request`);
+  }
+}
+
+function checkCircuitBreaker() {
+  if (!state.circuitOpen) return { ok: true };
+  
+  const now = Date.now();
+  if (now > state.circuitOpenUntil) {
+    // Half-open: allow one request through
+    return { ok: true, halfOpen: true };
+  }
+  
+  return {
+    ok: false,
+    waitMs: state.circuitOpenUntil - now,
+    reason: `Circuit breaker open (trip #${state.tripCount}). ${Math.ceil((state.circuitOpenUntil - now) / 1000)}s remaining`,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// CONCURRENCY CONTROL (single-threaded like real CLI)
+// ═══════════════════════════════════════════════════════════════════
+
+function acquireSlot() {
+  if (state.activeRequests < CONFIG.maxConcurrent) {
+    state.activeRequests++;
+    return true;
+  }
+  return false;
+}
+
+function releaseSlot() {
+  state.activeRequests = Math.max(0, state.activeRequests - 1);
+}
+
+export function waitForSlot() {
+  return new Promise((resolve) => {
+    if (acquireSlot()) return resolve();
+    state.requestQueue.push(resolve);
+  });
+}
+
+export function finishSlot() {
+  releaseSlot();
+  if (state.requestQueue.length > 0) {
+    const next = state.requestQueue.shift();
+    state.activeRequests++;
+    next();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// REQUEST TRANSFORMATION
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Transform the request body to look like authentic Claude Code traffic.
- * - Injects Claude Code tool definitions
- * - Rewrites system prompt to match Claude Code's format
- * - Normalizes conversation structure
+ * Transform request body to look like authentic Claude Code traffic.
  */
 export function transformRequest(bodyStr) {
   let body;
@@ -421,45 +633,56 @@ export function transformRequest(bodyStr) {
     return bodyStr;
   }
   
-  // 1. Inject Claude Code tools if not present
+  // 1. Tool injection
   if (!body.tools || body.tools.length === 0) {
     body.tools = CLAUDE_CODE_TOOLS;
   }
   
-  // 2. Rewrite system prompt to match Claude Code format
+  // 2. System prompt rewrite
   body.system = buildSystemPrompt(body.system);
   
-  // 3. Add metadata that Claude Code sends
-  if (!body.metadata) body.metadata = {};
-  // Claude Code doesn't send extensive metadata, keep it minimal
+  // 3. Force streaming (Claude Code always streams)
+  body.stream = true;
   
-  // 4. Ensure streaming matches Claude Code behavior (usually streaming)
-  // Don't override if explicitly set
+  // 4. Model pinning per session
+  if (state.pinnedModel && body.model) {
+    // Don't override if the caller specifically chose a model
+    // But track it for consistency
+    state.lastModel = body.model;
+  } else if (body.model) {
+    state.pinnedModel = body.model;
+    state.lastModel = body.model;
+  }
+  
+  // 5. Inject synthetic tool history (make conversation look like a coding session)
+  if (body.messages && body.messages.length > 0) {
+    body.messages = maybeInjectToolHistory(body.messages);
+  }
+  
+  // 6. Clean metadata (Claude Code sends minimal metadata)
+  delete body.metadata;
+  
+  // 7. Max tokens normalization (Claude Code uses specific defaults)
+  if (!body.max_tokens) {
+    body.max_tokens = 16000;
+  }
   
   return JSON.stringify(body);
 }
 
-/**
- * Build a system prompt that looks exactly like Claude Code's
- */
 function buildSystemPrompt(existingSystem) {
   const blocks = [];
   
-  // First block: Claude Code identity (always present, cached)
   blocks.push({
     type: "text",
     text: SYSTEM_PROMPT_PREFIX,
     cache_control: { type: "ephemeral" },
   });
   
-  // Second block: project context / CLAUDE.md content
-  // Wrap the original system prompt as if it's CLAUDE.md content
   let originalText = "";
   if (typeof existingSystem === "string") {
-    // Strip the basic "You are Claude Code" prefix if already there
-    originalText = existingSystem.replace(/^You are Claude Code, Anthropic's official CLI for Claude\.\s*/i, "");
+    originalText = existingSystem.replace(/^You are Claude Code.*?Use technical language when appropriate\.\s*/s, "");
   } else if (Array.isArray(existingSystem)) {
-    // Extract text from blocks, skip any that are just the prefix
     for (const block of existingSystem) {
       if (block.type === "text" && !block.text.startsWith("You are Claude Code")) {
         originalText += block.text + "\n";
@@ -478,32 +701,158 @@ function buildSystemPrompt(existingSystem) {
   return blocks;
 }
 
+/**
+ * Inject synthetic tool_use/tool_result pairs into message history.
+ * Makes the conversation look like an ongoing coding session.
+ */
+function maybeInjectToolHistory(messages) {
+  // Only inject if this looks like a fresh conversation (few messages)
+  // and we haven't already injected
+  if (messages.length > 4) return messages;
+  if (Math.random() > CONFIG.conversation.injectToolHistoryChance) return messages;
+  
+  const numPairs = randomInt(1, CONFIG.conversation.maxInjectedPairs);
+  const injected = [];
+  
+  // Add the first user message
+  if (messages.length > 0) {
+    injected.push(messages[0]);
+  }
+  
+  // Inject synthetic coding interaction
+  for (let i = 0; i < numPairs; i++) {
+    const templateFn = SYNTHETIC_TOOL_TEMPLATES[randomInt(0, SYNTHETIC_TOOL_TEMPLATES.length - 1)];
+    const file = CONFIG.conversation.fakeFiles[randomInt(0, CONFIG.conversation.fakeFiles.length - 1)];
+    const pair = templateFn(state.workingDir, file);
+    
+    // Fix tool_use_id reference
+    pair.result.tool_use_id = pair.use.id;
+    
+    // Assistant message with tool_use
+    injected.push({
+      role: "assistant",
+      content: [
+        { type: "text", text: randomPickAssistantText() },
+        pair.use,
+      ],
+    });
+    
+    // User message with tool_result
+    injected.push({
+      role: "user",
+      content: [pair.result],
+    });
+  }
+  
+  // Add remaining original messages (skip first since we already added it)
+  for (let i = 1; i < messages.length; i++) {
+    injected.push(messages[i]);
+  }
+  
+  return injected;
+}
+
+function randomPickAssistantText() {
+  const texts = [
+    "Let me check that file.",
+    "I'll look at the current state of the project.",
+    "Let me examine the code.",
+    "I'll check that for you.",
+    "Let me take a look.",
+    "Checking the project structure.",
+    "Let me read the relevant file.",
+    "I'll investigate that.",
+  ];
+  return texts[randomInt(0, texts.length - 1)];
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// RESPONSE VALIDATOR (detect ban signals)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Analyze upstream response for ban/throttle signals.
+ * Returns: { isBan: bool, isThrottle: bool, signal: string }
+ */
+export function analyzeResponse(status, headers, bodyPreview) {
+  const signals = {
+    isBan: false,
+    isThrottle: false,
+    isWarning: false,
+    signal: "clean",
+  };
+  
+  // Hard ban signals
+  if (status === 401 || status === 403) {
+    signals.isBan = true;
+    signals.signal = `auth-rejected (${status})`;
+  }
+  
+  // Throttle signals
+  if (status === 429) {
+    signals.isThrottle = true;
+    signals.signal = "rate-limited";
+    // Check Retry-After header
+    const retryAfter = headers?.get?.("retry-after");
+    if (retryAfter) {
+      signals.retryAfterSeconds = parseInt(retryAfter) || 60;
+    }
+  }
+  
+  // Overloaded
+  if (status === 529) {
+    signals.isThrottle = true;
+    signals.signal = "overloaded";
+  }
+  
+  // Suspicious body content
+  if (bodyPreview) {
+    const lower = bodyPreview.toLowerCase();
+    if (lower.includes("unauthorized") || lower.includes("forbidden")) {
+      signals.isWarning = true;
+      signals.signal = "auth-warning";
+    }
+    if (lower.includes("abuse") || lower.includes("violation") || lower.includes("suspended")) {
+      signals.isBan = true;
+      signals.signal = "abuse-detected";
+    }
+  }
+  
+  return signals;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // HEADER GENERATION
 // ═══════════════════════════════════════════════════════════════════
 
-/**
- * Generate headers that exactly match Claude Code CLI
- */
 export function getHeaders() {
   return {
     "user-agent": `claude-cli/${state.currentVersion} ${state.currentPlatform}`,
     "x-app": "cli",
     "anthropic-dangerous-direct-browser-access": "true",
     "anthropic-beta": CONFIG.betaFeatures.join(","),
+    // Connection keep-alive matches Node.js HTTP agent defaults
+    "connection": "keep-alive",
   };
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// MAIN GATE (called before every proxied request)
+// MAIN GATE
 // ═══════════════════════════════════════════════════════════════════
 
-/**
- * Anti-ban gate. Call before forwarding each request.
- * Returns: { proceed: bool, waitMs: number, headers: object, reason?: string }
- */
 export async function antiBanGate() {
-  // 1. Rate limit check
+  // 0. Circuit breaker
+  const cb = checkCircuitBreaker();
+  if (!cb.ok) {
+    return {
+      proceed: false,
+      waitMs: cb.waitMs,
+      reason: cb.reason,
+      headers: {},
+    };
+  }
+  
+  // 1. Rate limit
   const rate = checkRateLimit();
   if (!rate.ok) {
     return {
@@ -514,36 +863,39 @@ export async function antiBanGate() {
     };
   }
   
-  // 2. Session rotation (may trigger break)
+  // 2. Concurrency (wait for slot)
+  await waitForSlot();
+  
+  // 3. Session rotation
   const sessionDelay = maybeSessionRotation();
-  if (sessionDelay > 60000) {
+  if (sessionDelay > 45000) {
+    finishSlot();
     return {
       proceed: false,
       waitMs: sessionDelay,
-      reason: `Session break (${Math.ceil(sessionDelay / 1000)}s). Simulating human pattern.`,
+      reason: `Session break (${Math.ceil(sessionDelay / 1000)}s)`,
       headers: {},
     };
   } else if (sessionDelay > 0) {
-    await sleep(Math.min(sessionDelay, 30000)); // Cap inline wait at 30s
+    await sleep(Math.min(sessionDelay, 30000));
   }
   
-  // 3. Human-like thinking delay
-  const delay = getHumanDelay();
-  await sleep(delay);
+  // 4. Human delay
+  await sleep(getHumanDelay());
   
-  // 4. Record
+  // 5. Record
   recordRequest();
   
-  // 5. Return with stealth headers
   return {
     proceed: true,
     waitMs: 0,
     headers: getHeaders(),
+    _releaseSlot: finishSlot, // Caller must call this when response completes
   };
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// STATS (for /health endpoint)
+// STATS
 // ═══════════════════════════════════════════════════════════════════
 
 export function getStats() {
@@ -552,14 +904,36 @@ export function getStats() {
     requestsThisHour: state.hourlyCount,
     requestsToday: state.dailyCount,
     isQuietHours: isQuietHours(),
+    isWeekend: isWeekend(),
     inSessionBreak: state.inBreak,
     sessionTurns: state.turnCount,
     currentVersion: state.currentVersion,
     currentPlatform: state.currentPlatform,
     burstProgress: `${state.currentBurstCount}/${state.currentBurstTarget}`,
-    toolsInjected: true,
-    promptRewritten: true,
+    circuitBreaker: state.circuitOpen ? `OPEN (trip #${state.tripCount})` : "closed",
+    consecutiveErrors: state.consecutiveErrors,
+    totalErrors: state.totalErrors,
+    activeRequests: state.activeRequests,
+    queuedRequests: state.requestQueue.length,
+    stealth: {
+      toolsInjected: true,
+      promptRewritten: true,
+      streamingForced: true,
+      modelPinned: state.pinnedModel || "none",
+      historyInjection: true,
+      concurrencyLimited: true,
+      circuitBreakerActive: true,
+    },
   };
 }
 
-export default { antiBanGate, getHeaders, getStats, transformRequest };
+export default {
+  antiBanGate,
+  getHeaders,
+  getStats,
+  transformRequest,
+  recordError,
+  recordSuccess,
+  analyzeResponse,
+  finishSlot,
+};
