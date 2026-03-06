@@ -114,6 +114,23 @@ const PERSONAS = [
 ];
 
 // Number of active personas (adjust to simulate team size)
+// Load .env if present (anti-ban loads before proxy.mjs env parsing)
+import { readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+const __abdir = dirname(fileURLToPath(import.meta.url));
+const __envPath = join(__abdir, ".env");
+if (existsSync(__envPath)) {
+  for (const line of readFileSync(__envPath, "utf-8").split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq === -1) continue;
+    const k = t.slice(0, eq).trim(), v = t.slice(eq + 1).trim();
+    if (!process.env[k]) process.env[k] = v;
+  }
+}
+
 const ACTIVE_PERSONA_COUNT = parseInt(process.env.PERSONA_COUNT || "2");
 
 const CONFIG = {

@@ -4,6 +4,9 @@ module.exports = {
     script: "proxy.mjs",
     cwd: __dirname,
     env_file: ".env",
+    env: {
+      PERSONA_COUNT: "3",
+    },
     watch: false,
     autorestart: true,
     max_restarts: 10,
